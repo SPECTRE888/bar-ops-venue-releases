@@ -1,0 +1,125 @@
+name: Build Bar Ops Venue
+
+# Build Electron de Bar Ops VENUE. Tourne ici (dépôt public) parce que les runners macOS
+# y sont gratuits ; le code source reste dans SPECTRE888/bar-ops-venue (privé), lu avec
+# une clé de déploiement en lecture seule. Lancé à la main (ou par bar-ops-venue) à chaque tag :
+#   gh workflow run build.yml -R SPECTRE888/bar-ops-venue-releases -f tag=v0.X.Y
+on:
+  repository_dispatch:
+    types: [build]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag de bar-ops-venue à builder (ex. v0.1.14)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - name: Check tag
+      run: |
+        [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "❌ Tag invalide : $TAG"; exit 1; }
+        echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+    - name: Checkout bar-ops-venue (privé)
+      uses: actions/checkout@v4
+      with:
+        repository: SPECTRE888/bar-ops-venue
+        ref: ${{ env.TAG }}
+        ssh-key: ${{ secrets.BAR_OPS_DEPLOY_KEY }}
+        persist-credentials: false
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Clean existing release
+      continue-on-error: true
+      run: gh release delete "$TAG" --yes --cleanup-tag --repo SPECTRE888/bar-ops-venue-releases
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: Build Electron app
+      run: npx electron-builder --mac --arm64 --publish=never
+      env:
+        CSC_IDENTITY_AUTO_DISCOVERY: false
+
+    - name: List dist output
+      run: ls -lh dist/ || true
+
+    - name: Build PKG installer
+      run: |
+        APP_PATH="dist/mac-arm64/Bar Ops Venue.app"
+
+        # Signer l'app en ad-hoc avant packaging
+        codesign --force --deep --sign - --timestamp=none "$APP_PATH"
+
+        # Créer le PKG (nom sans espace)
+        pkgbuild \
+          --root "dist/mac-arm64" \
+          --install-location "/Applications" \
+          --scripts "scripts/pkg" \
+          --identifier "com.barops.venue" \
+          --version "$VERSION" \
+          "dist/BarOpsVenue-${VERSION}-Installer.pkg"
+
+        echo "✅ PKG créé: dist/BarOpsVenue-${VERSION}-Installer.pkg"
+
+    - name: Sign update ZIP
+      run: node scripts/sign-update.js "dist/BarOpsVenue-${VERSION}-arm64-mac.zip"
+      env:
+        UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+
+    - name: Create release & upload assets
+      run: |
+        echo "=== dist/ contents ==="
+        ls -lh dist/
+
+        # Le ZIP et sa signature sont obligatoires : sans eux, l'auto-updater refuse la mise à jour
+        for f in "dist/BarOpsVenue-${VERSION}-arm64-mac.zip" "dist/BarOpsVenue-${VERSION}-arm64-mac.zip.sig"; do
+          [ -f "$f" ] || { echo "❌ Missing (obligatoire): $f"; exit 1; }
+        done
+
+        # Collecter uniquement les fichiers qui existent
+        FILES=()
+        for f in \
+          "dist/BarOpsVenue-${VERSION}-Installer.pkg" \
+          "dist/BarOpsVenue-${VERSION}-arm64-mac.zip" \
+          "dist/BarOpsVenue-${VERSION}-arm64-mac.zip.sig" \
+          "dist/BarOpsVenue-${VERSION}-arm64-mac.zip.blockmap" \
+          "dist/BarOpsVenue-${VERSION}-arm64-mac.dmg" \
+          "dist/BarOpsVenue-${VERSION}-arm64-mac.dmg.blockmap" \
+          "dist/latest-mac.yml"
+        do
+          if [ -f "$f" ]; then
+            FILES+=("$f")
+            echo "✅ Found: $f"
+          else
+            echo "⚠️  Missing: $f"
+          fi
+        done
+
+        gh release create "$TAG" \
+          --repo SPECTRE888/bar-ops-venue-releases \
+          --title "$TAG" \
+          --notes "Bar Ops Venue ${TAG}" \
+          "${FILES[@]}"
+      env:
+        GH_TOKEN: ${{ github.token }}
