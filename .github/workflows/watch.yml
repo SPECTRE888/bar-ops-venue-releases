@@ -1,0 +1,48 @@
+name: Watch Venue tags
+
+# Déclenchement automatique du build sans jeton personnel : toutes les 10 min, on lit les tags du
+# dépôt privé SPECTRE888/bar-ops-venue avec la clé de déploiement en lecture seule (BAR_OPS_DEPLOY_KEY).
+# Si le tag v* le plus récent n'a ni release ni build déjà lancé, on lance build.yml pour ce tag.
+# Un build qui échoue n'est PAS relancé en boucle : relance à la main avec
+#   gh workflow run build.yml -R SPECTRE888/bar-ops-venue-releases -f tag=v0.X.Y
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Dernier tag de bar-ops-venue
+      env:
+        DEPLOY_KEY: ${{ secrets.BAR_OPS_DEPLOY_KEY }}
+      run: |
+        umask 077; printf '%s\n' "$DEPLOY_KEY" > /tmp/k
+        TAG=$(GIT_SSH_COMMAND="ssh -i /tmp/k -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+          git ls-remote --tags --refs git@github.com:SPECTRE888/bar-ops-venue.git 'v*' \
+          | sed 's#.*refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+        rm -f /tmp/k
+        [ -n "$TAG" ] || { echo "Aucun tag v*"; exit 0; }
+        echo "Dernier tag : $TAG"; echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+    - name: Lancer le build si besoin
+      if: env.TAG != ''
+      env:
+        GH_TOKEN: ${{ github.token }}
+        R: ${{ github.repository }}
+      run: |
+        if gh release view "$TAG" -R "$R" >/dev/null 2>&1; then echo "✅ Release $TAG déjà publiée"; exit 0; fi
+        if gh run list -R "$R" -w build.yml -L 50 --json displayTitle -q '.[].displayTitle' | grep -qx "Build $TAG"; then
+          echo "⏳ Un build pour $TAG existe déjà (en cours, ou échoué : relance manuelle)"; exit 0
+        fi
+        gh workflow run build.yml -R "$R" -f tag="$TAG"
+        echo "🚀 Build lancé pour $TAG"

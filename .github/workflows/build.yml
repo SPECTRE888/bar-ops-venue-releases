@@ -1,4 +1,5 @@
 name: Build Bar Ops Venue
+run-name: Build ${{ github.event.client_payload.tag || inputs.tag }}
 
 # Build Electron de Bar Ops VENUE. Tourne ici (dépôt public) parce que les runners macOS
 # y sont gratuits ; le code source reste dans SPECTRE888/bar-ops-venue (privé), lu avec
